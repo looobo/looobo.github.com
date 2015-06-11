@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset='utf-8'>
+    <meta http-equiv="X-UA-Compatible" content="chrome=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+    <link href='https://fonts.googleapis.com/css?family=Architects+Daughter' rel='stylesheet' type='text/css'>
+    <link rel="stylesheet" type="text/css" href="stylesheets/stylesheet.css" media="screen">
+    <link rel="stylesheet" type="text/css" href="stylesheets/github-light.css" media="screen">
+    <link rel="stylesheet" type="text/css" href="stylesheets/print.css" media="print">
+
+    <!--[if lt IE 9]>
+    <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    <title>用python扩展GDB by looobo</title>
+  </head>
+
+  <body>
+    <header>
+      <div class="inner">
+        <h1>用python扩展GDB</h1>
+        <h2>gdb python pretty-printer</h2>
+        <a href="https://github.com/looobo" class="button"><small>Follow me on</small> GitHub</a>
+      </div>
+    </header>
+
+    <div id="content-wrapper">
+      <div class="inner clearfix">
+        <section id="main-content">
+          <h1>
+<a id="python命令行" class="anchor" href="#python%E5%91%BD%E4%BB%A4%E8%A1%8C" aria-hidden="true"><span class="octicon octicon-link"></span></a>python命令行</h1>
+
+<p>使用python可以对gdb进行扩展，如果想使用这个特性，需要gdb具有<code>--with-python</code>配置项。查看当前gdb配置可以用<code>show configuration</code>命令</p>
+
+<pre><code>(gdb) show configuration
+This GDB was configured as follows:
+   configure --host=x86_64-apple-darwin13.1.0 --target=x86_64-apple-darwin13.1.0
+             --with-auto-load-dir=:${prefix}/share/auto-load
+             --with-auto-load-safe-path=:${prefix}/share/auto-load
+             --with-expat
+             --with-gdb-datadir=/usr/local/Cellar/gdb/7.7.1/share/gdb (relocatable)
+             --with-jit-reader-dir=/usr/local/Cellar/gdb/7.7.1/lib/gdb (relocatable)
+             --without-libunwind-ia64
+             --without-lzma
+             --with-python=/System/Library/Frameworks/Python.framework/Versions/2.7
+             --with-separate-debug-dir=/usr/local/Cellar/gdb/7.7.1/lib/debug (relocatable)
+             --with-zlib
+             --without-babeltrace
+</code></pre>
+
+<p>供gdb调用的py脚本需要放在<code>data-directory/python</code>目录下<code>data-directory</code>目录是gdb启动时读取的数据文件目录。查看当前的数据文件目录：</p>
+
+<pre><code>(gdb) show data-directory
+GDB's data directory is "/usr/local/Cellar/gdb/7.7.1/share/gdb".
+</code></pre>
+
+<p>ls一下这个目录，可以发现有以下几个目录：</p>
+
+<pre><code>(gdb) shell ls /usr/local/Cellar/gdb/7.7.1/share/gdb
+python      syscalls    system-gdbinit
+</code></pre>
+
+<p><code>data-directory/python</code>是gdb里python解释器默认的脚本搜索路径。
+gdb启动的时候会从<code>data-directory/python/gdb/command</code>加载自定义命令 
+从<code>data- directory/python/gdb/function</code>加载convenience functions.</p>
+
+<p>所谓convenience functions.是指在gdb里面通过<code>$函数名</code>调用的函数。</p>
+
+<pre><code>(gdb) call $_streq("a", "1")
+$2 = 0
+(gdb) call $_streq("a", "a")
+$3 = 1
+</code></pre>
+
+<p><code>_streq</code>是系统定义的，还可以用python脚本自定义convenience functions.
+<code>python-interactive [command]</code>或者<code>pi [command]</code>会启动一个python解释器
+<code>python [command]</code>或者<code>py [command]</code>执行一段python代码
+<code>source [script-name]</code>运行一个python脚本，脚本必须以.py作为扩展名
+<code>python execfile ("script-name")</code>也可以运行一个python脚本，但它是基于<code>execfile</code>的。</p>
+
+<h1>
+<a id="用python写一个gdb命令" class="anchor" href="#%E7%94%A8python%E5%86%99%E4%B8%80%E4%B8%AAgdb%E5%91%BD%E4%BB%A4" aria-hidden="true"><span class="octicon octicon-link"></span></a>用python写一个gdb命令</h1>
+
+<p>gdb为了支持python，提供了一个gdb模块，在python代码中随时可以<code>python help(gdb)</code>来查看gdb模块的帮助，如果想了解某个具体的类(比如FrameDecorator)还可以<code>python help(gdb.FrameDecorator)</code> help 命令是学习python gdb模块特别有用的工具。</p>
+
+<p>本节用python来实现一个查看堆栈信息的程序。在gdb手册里，gdb有以下几个API:</p>
+
+<pre><code>gdb.PYTHONDIR 
+    gdb中与python模块相关的文件（脚本）都放在这个目录下
+gdb.execute(command[, from tty [, to_string]])
+    执行一个gdb命令,from_tty 表示来自命令行还是脚本。to_string如果为true那么输出就由execute函数返回，否则会打印在gdb的标准输出流上
+gdb.breakpoints()
+gdb.parameter(parameter)
+gdb.history(number)     
+gdb.parse_and_eval (expression) 
+    #expression是一条c++语句，执行这条语句，并返回结果。结果是gdb.Value类型的.这个接口在实现一个自定义命令的时候比较有用，因为如果参数是一个表达式的话，就可以用这个接口来计算表达式的值。这个接口也是唯一一种把convenience变量转换为gdb.Value的方法。
+gdb.find_pc_line (pc)
+gdb.post_event 
+gdb.write(string [, stream])
+gdb.flush()
+gdb.target_charset()
+gdb.target_wide_charset ()
+gdb.solib_name (address)
+gdb.decode_line [expression]
+gdb.prompt_hook (current prompt)
+</code></pre>
+
+<p>写一个打印hello world的命令</p>
+
+<div class="highlight highlight-python"><pre><span class="pl-k">import</span> gdb
+
+<span class="pl-k">class</span> <span class="pl-en">HelloWorld</span>(<span class="pl-e">gdb.Command</span>):
+    <span class="pl-s"><span class="pl-pds">"""</span>Greet the whole world.<span class="pl-pds">"""</span></span>
+    <span class="pl-k">def</span> <span class="pl-en"><span class="pl-c1">__init__</span></span> (<span class="pl-smi">self</span>):
+        <span class="pl-c1">super</span>(HelloWorld, <span class="pl-v">self</span>).__init__(<span class="pl-s"><span class="pl-pds">"</span>hello-world<span class="pl-pds">"</span></span>, gdb.COMMAND_USER)
+
+    <span class="pl-k">def</span> <span class="pl-en">invoke</span> (<span class="pl-smi">self</span>, <span class="pl-smi">args</span>, <span class="pl-smi">from_tty</span>):
+        argv <span class="pl-k">=</span> gdb.string_to_argv(args)
+        <span class="pl-k">if</span> <span class="pl-c1">len</span> (argv) <span class="pl-k">!=</span> <span class="pl-c1">0</span>:
+            <span class="pl-k">raise</span> gdb.GdbError (<span class="pl-s"><span class="pl-pds">"</span>hello-world takes no arguments<span class="pl-pds">"</span></span>)
+        <span class="pl-k">print</span> <span class="pl-s"><span class="pl-pds">"</span>Hello, World!<span class="pl-pds">"</span></span>
+
+HelloWorld()</pre></div>
+
+<p>写一个打印某个地址区间汇编指令的命令</p>
+
+<div class="highlight highlight-python"><pre><span class="pl-k">import</span> gdb
+
+<span class="pl-k">class</span> <span class="pl-en">BackTracePrinter</span>(<span class="pl-e">gdb.Command</span>):
+    <span class="pl-s"><span class="pl-pds">"</span>print backtrace <span class="pl-pds">"</span></span>
+    <span class="pl-k">def</span> <span class="pl-en"><span class="pl-c1">__init__</span></span>(<span class="pl-smi">self</span>):
+        <span class="pl-c1">super</span>(BackTracePrinter, <span class="pl-v">self</span>).__init__(<span class="pl-s"><span class="pl-pds">"</span>pretty-backtrace<span class="pl-pds">"</span></span>, gdb.COMMAND_USER)
+
+    <span class="pl-k">def</span> <span class="pl-en">invoke</span> (<span class="pl-smi">self</span>, <span class="pl-smi">args</span>, <span class="pl-smi">from_tty</span>):
+        argv <span class="pl-k">=</span> gdb.string_to_argv(args)
+        newestFrame <span class="pl-k">=</span> gdb.newest_frame()
+        <span class="pl-k">print</span> <span class="pl-s"><span class="pl-pds">"</span>the newest frame is : <span class="pl-pds">"</span></span> <span class="pl-k">+</span> newestFrame.name()
+
+        architecture <span class="pl-k">=</span> newestFrame.architecture()
+        <span class="pl-k">print</span> <span class="pl-s"><span class="pl-pds">"</span>this architecture is : <span class="pl-pds">"</span></span> <span class="pl-k">+</span> architecture.name()
+
+        <span class="pl-k">for</span> inc <span class="pl-k">in</span> architecture.disassemble(<span class="pl-c1">int</span>(argv[<span class="pl-c1">0</span>], <span class="pl-c1">16</span>), <span class="pl-c1">int</span>(argv[<span class="pl-c1">1</span>], <span class="pl-c1">16</span>)):
+            <span class="pl-k">print</span> inc[<span class="pl-s"><span class="pl-pds">'</span>asm<span class="pl-pds">'</span></span>]
+
+
+BackTracePrinter()</pre></div>
+
+<h1>
+<a id="pretty-printing" class="anchor" href="#pretty-printing" aria-hidden="true"><span class="octicon octicon-link"></span></a>Pretty Printing</h1>
+
+<p>用python扩展gdb的命令意义有限，毕竟gdb已经提供了足够的命令用于查看程序的方方面面。它存在的最大意义是pretty printing。不但可以显示STL，boost等标准库容器变量，还可以为自定义的类实现一个pretty printer。当然，在工程实践中我们会定义非常多的类，似乎没有必要为每一个类实现一个pretty printer，但是如果为几个核心的类实现出print printer的话，就可以方便定位，还可以作为新人学习了解模块的有效工具。</p>
+
+<p><code>info pretty-printer</code>可以查看当前有哪些pretty printers</p>
+        </section>
+
+        <aside id="sidebar">
+
+
+          <p>This page was generated by <a href="https://pages.github.com">GitHub Pages</a> using the Architect theme by <a href="https://twitter.com/jasonlong">Jason Long</a>.</p>
+        </aside>
+      </div>
+    </div>
+
+  
+  </body>
+</html>
